@@ -1,42 +1,32 @@
 #!/usr/bin/env python3
 """
 Generate apparel.html from LeBonCoin scraped data.
-Reads data/leboncoin.json (written by the scheduled Claude task via Chrome)
-and produces the HTML results page.
+Structured as a top-level "Apparel" page with sections (like DBA Kunst).
 
 JM Weston 180 size 5D equivalents:
   - JM Weston: 5
   - UK: 5.5
   - EU: 38.5 / 39 / 39.5 (depending on last; 180 runs small)
   - US: 6 / 6.5
-
-LeBonCoin shoe_size values for target sizes:
-  - "23" = EU 38
-  - "57" = EU 37.5  (too small usually)
-  - "24" = EU 39
-  - "59" = EU 39.5
 """
 
 import json
 import os
+import re
 import html
 from datetime import datetime
 
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(OUTPUT_DIR, "data", "leboncoin.json")
 
-# EU sizes that correspond to JM Weston 5D
 TARGET_SIZES = {"38", "38,5", "39", "39,5"}
-
-# Also match by title patterns for JM Weston sizing (e.g. "5D", "5/D", "5 D")
-import re
 WESTON_SIZE_PATTERN = re.compile(r"\b5[\s/]?[dD]\b")
 
 
 def format_price_eur(price):
     if not price:
-        return "Prix non indiqué"
-    return f"{int(price):,} €".replace(",", " ")
+        return "Prix non indique"
+    return f"{int(price):,} EUR".replace(",", " ")
 
 
 def load_data():
@@ -47,65 +37,84 @@ def load_data():
 
 
 def filter_listings(listings):
-    """Filter for target size and JM Weston 180."""
     results = []
     for item in listings:
         eu_size = item.get("shoe_size_eu", "")
         title = item.get("title", "")
-
-        # Check if size matches
         size_match = eu_size in TARGET_SIZES
-        # Also check title for Weston-specific sizing
         title_match = bool(WESTON_SIZE_PATTERN.search(title))
-
         if size_match or title_match:
             results.append(item)
-
     return results
 
 
-def generate_html(listings, timestamp):
-    cards = ""
+def render_cards(listings):
     if not listings:
-        cards = '<p class="empty">Ingen resultater fundet. Scraping k&oslash;rer dagligt kl. 5:30.</p>'
-    else:
-        for item in listings:
-            img = item.get("image", "")
-            if img:
-                img_html = f'<img src="{html.escape(img)}" alt="{html.escape(item["title"])}" loading="lazy" onerror="this.parentElement.innerHTML=\'<div class=no-img>No image</div>\'">'
-            else:
-                img_html = '<div class="no-img">No image</div>'
+        return '<p class="empty">Ingen resultater fundet.</p>'
 
-            price = format_price_eur(item.get("price", 0))
-            city = item.get("city", "")
-            size = item.get("shoe_size_eu", "")
-            condition = item.get("condition", "")
+    cards = ""
+    for item in listings:
+        img = item.get("image", "")
+        if img:
+            img_html = f'<img src="{html.escape(img)}" alt="{html.escape(item["title"])}" loading="lazy" onerror="this.parentElement.innerHTML=\'<div class=no-img>Intet billede</div>\'">'
+        else:
+            img_html = '<div class="no-img">Intet billede</div>'
 
-            size_badge = f'<span class="badge size">EU {html.escape(size)}</span>' if size else ''
-            cond_badge = f'<span class="badge cond">{html.escape(condition)}</span>' if condition else ''
+        price = format_price_eur(item.get("price", 0))
+        city = item.get("city", "")
+        size = item.get("shoe_size_eu", "")
+        condition = item.get("condition", "")
 
-            cards += f'''
-            <a href="{html.escape(item["url"])}" target="_blank" rel="noopener" class="card">
-                <div class="card-img">{img_html}</div>
-                <div class="card-body">
-                    <h3>{html.escape(item["title"])}</h3>
-                    <div class="price">{html.escape(price)}</div>
-                    <div class="location">{html.escape(city)}</div>
-                    <div class="badges">
-                        {size_badge}
-                        {cond_badge}
-                    </div>
+        size_badge = f'<span class="badge size">EU {html.escape(size)}</span>' if size else ''
+        cond_badge = f'<span class="badge cond">{html.escape(condition)}</span>' if condition else ''
+
+        cards += f'''
+        <a href="{html.escape(item["url"])}" target="_blank" rel="noopener" class="card">
+            <div class="card-img">{img_html}</div>
+            <div class="card-body">
+                <h3>{html.escape(item["title"])}</h3>
+                <div class="price">{html.escape(price)}</div>
+                <div class="location">{html.escape(city)}</div>
+                <div class="badges">
+                    {size_badge}
+                    {cond_badge}
                 </div>
-            </a>'''
+            </div>
+        </a>'''
+    return cards
 
-    count = len(listings)
+
+def generate_html(section_results, timestamp):
+    total = sum(len(listings) for _, _, listings in section_results)
+
+    # Build nav
+    nav_html = '<a href="index.html" class="nav-link" style="border-right:1px solid #333;padding-right:1.5rem;margin-right:0.5rem">DBA Kunst</a>'
+    for section_id, section_title, listings in section_results:
+        count = len(listings)
+        nav_html += f'<a href="#{html.escape(section_id)}" class="nav-link">{html.escape(section_title)} <span class="nav-count">{count}</span></a>'
+
+    # Build sections
+    sections_html = ""
+    for section_id, section_title, listings in section_results:
+        count = len(listings)
+        sections_html += f'''
+        <section id="{html.escape(section_id)}">
+            <div class="section-header">
+                <h2>{html.escape(section_title)}</h2>
+                <p>LeBonCoin &mdash; Taille 5D (EU 38&ndash;39.5 / UK 5.5 / US 6&ndash;6.5)</p>
+                <span class="section-count">{count} resultater</span>
+            </div>
+            <div class="grid">
+                {render_cards(listings)}
+            </div>
+        </section>'''
 
     return f'''<!DOCTYPE html>
-<html lang="fr">
+<html lang="da">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JM Weston 180 &mdash; LeBonCoin</title>
+<title>Apparel &mdash; LeBonCoin</title>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{
@@ -140,19 +149,67 @@ def generate_html(listings, timestamp):
     font-size: 0.8rem;
     color: #666;
   }}
-  .size-info {{
-    background: #1a1a1a;
+  nav {{
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    padding: 1rem 2rem;
+    background: #151515;
     border-bottom: 1px solid #222;
-    padding: 0.8rem 2rem;
-    text-align: center;
-    font-size: 0.75rem;
+  }}
+  .nav-link {{
+    color: #aaa;
+    text-decoration: none;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    transition: background 0.2s, color 0.2s;
+  }}
+  .nav-link:hover {{
+    background: #2a2a2a;
+    color: #fff;
+  }}
+  .nav-count {{
+    display: inline-block;
+    background: #333;
+    color: #888;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    margin-left: 4px;
+  }}
+  section {{
+    padding-bottom: 1rem;
+  }}
+  .section-header {{
+    padding: 2rem 2rem 0.5rem;
+    max-width: 1400px;
+    margin: 0 auto;
+  }}
+  .section-header h2 {{
+    font-size: 1.4rem;
+    font-weight: 400;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #fff;
+    border-bottom: 1px solid #333;
+    padding-bottom: 0.5rem;
+    display: inline-block;
+  }}
+  .section-header p {{
+    color: #777;
+    font-size: 0.8rem;
+    margin-top: 0.4rem;
+  }}
+  .section-count {{
     color: #555;
+    font-size: 0.75rem;
   }}
   .grid {{
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 1.5rem;
-    padding: 2rem;
+    padding: 1rem 2rem 2rem;
     max-width: 1400px;
     margin: 0 auto;
   }}
@@ -235,38 +292,26 @@ def generate_html(listings, timestamp):
     color: #666;
     grid-column: 1 / -1;
   }}
-  .back-link {{
-    display: inline-block;
-    margin-top: 0.8rem;
-    color: #555;
-    font-size: 0.8rem;
-    text-decoration: none;
-  }}
-  .back-link:hover {{
-    color: #888;
-  }}
   @media (max-width: 600px) {{
     .grid {{ padding: 1rem; gap: 1rem; }}
     header {{ padding: 1.5rem 1rem; }}
+    nav {{ flex-wrap: wrap; }}
   }}
 </style>
 </head>
 <body>
 <header>
-  <h1>JM Weston 180</h1>
-  <p>LeBonCoin &mdash; Taille 5D (EU 38&ndash;39.5)</p>
+  <h1>Apparel</h1>
+  <p>LeBonCoin</p>
   <div class="meta">
-    <span>{count} resultater</span>
+    <span>{total} resultater</span>
     <span>Opdateret: {timestamp}</span>
   </div>
-  <a href="index.html" class="back-link">&larr; DBA Kunst</a>
 </header>
-<div class="size-info">
-  JM Weston 5D = UK 5.5 = EU 38.5&ndash;39.5 = US 6&ndash;6.5
-</div>
-<div class="grid">
-{cards}
-</div>
+<nav>
+{nav_html}
+</nav>
+{sections_html}
 </body>
 </html>'''
 
@@ -276,16 +321,21 @@ def main():
     filtered = filter_listings(listings)
     filtered.sort(key=lambda l: l.get("price", 0))
 
+    section_results = [
+        ("jm-weston-180", "JM Weston 180", filtered),
+    ]
+
     timestamp = datetime.now().strftime("%d/%m/%Y kl. %H:%M")
-    output = generate_html(filtered, timestamp)
+    output = generate_html(section_results, timestamp)
 
     output_path = os.path.join(OUTPUT_DIR, "apparel.html")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(output)
 
+    total = len(filtered)
     print(f"Generated: {output_path}")
     print(f"Total listings in data: {len(listings)}")
-    print(f"Matching size 5D (EU 38-39.5): {len(filtered)}")
+    print(f"Matching size 5D (EU 38-39.5): {total}")
     print(f"Timestamp: {timestamp}")
 
 

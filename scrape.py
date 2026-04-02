@@ -204,7 +204,7 @@ def generate_html(section_results, timestamp):
         count = len(listings)
         nav_html += f'<a href="#{html.escape(section["id"])}" class="nav-link">{html.escape(section["title"])} <span class="nav-count">{count}</span></a>'
 
-    nav_html += '<a href="apparel.html" class="nav-link" style="border-left:1px solid #333;padding-left:1.5rem;margin-left:0.5rem">JM Weston 180</a>'
+    nav_html += '<a href="apparel.html" class="nav-link" style="border-left:1px solid #333;padding-left:1.5rem;margin-left:0.5rem">Apparel</a>'
 
     # Build sections
     sections_html = ""
