@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Scrape DBA.dk for Tal R original artworks (lithographies, paintings, prints).
-Filters out posters, merchandise, and non-Tal-R items.
-Generates index.html with results.
+Scrape DBA.dk for original artworks across multiple search sections.
+Generates a single index.html with all results grouped by section.
 
 Uses JSON-LD structured data embedded in DBA search pages.
 """
@@ -14,27 +13,49 @@ import os
 import html
 from datetime import datetime
 
-SEARCHES = [
-    ("Litografi", "tal+r+litografi"),
-    ("Maleri", "tal+r+maleri"),
-    ("Tryk", "tal+r+tryk"),
-    ("Signeret", "tal+r+signeret"),
-]
-
 BASE_URL = "https://www.dba.dk/soeg/?soeg={query}"
-
-EXCLUDE_PATTERNS = [
-    r"\bplakat\b", r"\bposter\b", r"\bkunstplakat\b", r"\budstillingsplakat\b",
-    r"\bkrus\b", r"\bmug\b", r"\bkop\b", r"\bt-shirt\b", r"\bbog\b",
-    r"\bbook\b", r"\bmagasin\b", r"\bkatalog\b", r"\bpostkort\b",
-    r"\bpude\b", r"\bcushion\b", r"\bopslagstavle\b", r"\bm\.m\.fl\b",
-    r"\blundstoem\b", r"\blundst.m\b", r"\bst.ttebillede\b",
-]
-
-TAL_R_PATTERN = re.compile(r"tal[\s\-_]*r\b", re.IGNORECASE)
-
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# ── Section definitions ──────────────────────────────────────────────
+
+SECTIONS = [
+    {
+        "id": "tal-r",
+        "title": "Tal R",
+        "subtitle": "Litografier, malerier og tryk — kun signerede originaler",
+        "searches": [
+            ("Litografi", "tal+r+litografi"),
+            ("Maleri", "tal+r+maleri"),
+            ("Tryk", "tal+r+tryk"),
+            ("Signeret", "tal+r+signeret"),
+        ],
+        "require_pattern": re.compile(r"tal[\s\-_]*r\b", re.IGNORECASE),
+        "exclude_patterns": [
+            r"\bplakat\b", r"\bposter\b", r"\bkunstplakat\b", r"\budstillingsplakat\b",
+            r"\bkrus\b", r"\bmug\b", r"\bkop\b", r"\bt-shirt\b", r"\bbog\b",
+            r"\bbook\b", r"\bmagasin\b", r"\bkatalog\b", r"\bpostkort\b",
+            r"\bpude\b", r"\bcushion\b", r"\bopslagstavle\b", r"\bm\.m\.fl\b",
+            r"\blundstoem\b", r"\blundst.m\b", r"\bst.ttebillede\b",
+        ],
+    },
+    {
+        "id": "v1-gallery",
+        "title": "V1 Gallery",
+        "subtitle": "Alt kunst fra V1 Gallery",
+        "searches": [
+            ("V1 Gallery", "v1+gallery"),
+            ("V1 Gallery kunst", "v1+gallery+kunst"),
+            ("V1 Gallery tryk", "v1+gallery+tryk"),
+        ],
+        "require_pattern": None,
+        "exclude_patterns": [
+            r"\bkrus\b", r"\bmug\b", r"\bkop\b", r"\bt-shirt\b",
+            r"\bpostkort\b", r"\bpude\b", r"\bcushion\b",
+        ],
+    },
+]
+
+# ── Fetching & parsing ───────────────────────────────────────────────
 
 def fetch_page(url):
     req = urllib.request.Request(url, headers={
@@ -59,10 +80,7 @@ def parse_json_ld(html_text):
         except json.JSONDecodeError:
             continue
 
-        # DBA uses CollectionPage with mainEntity.itemListElement
-        if not isinstance(data, dict):
-            continue
-        if data.get("@type") != "CollectionPage":
+        if not isinstance(data, dict) or data.get("@type") != "CollectionPage":
             continue
 
         main_entity = data.get("mainEntity", {})
@@ -80,30 +98,26 @@ def parse_json_ld(html_text):
 
             offers = item.get("offers", {})
             price_val = offers.get("price", "")
-            currency = offers.get("priceCurrency", "DKK")
-            price = f"{int(float(price_val)):,} {currency}".replace(",", ".") if price_val else ""
 
             if url and name:
                 listings.append({
                     "title": name,
-                    "price": price,
                     "price_num": float(price_val) if price_val else 0,
                     "description": description,
                     "image": image,
                     "url": url,
-                    "location": "",
                 })
 
     return listings
 
 
-def is_excluded(listing):
+def is_excluded(listing, section):
     text = f"{listing['title']} {listing['description']}".lower()
 
-    if not TAL_R_PATTERN.search(text):
+    if section.get("require_pattern") and not section["require_pattern"].search(text):
         return True
 
-    for pattern in EXCLUDE_PATTERNS:
+    for pattern in section.get("exclude_patterns", []):
         if re.search(pattern, text, re.IGNORECASE):
             return True
 
@@ -111,45 +125,107 @@ def is_excluded(listing):
 
 
 def format_price(price_num):
-    """Format price as Danish style: 8.000 DKK"""
     if not price_num:
         return "Pris ikke angivet"
     return f"{int(price_num):,} DKK".replace(",", ".")
 
 
-def generate_html(all_listings, timestamp):
-    cards_html = ""
+# ── Scrape one section ───────────────────────────────────────────────
 
-    if not all_listings:
-        cards_html = '<p class="empty">Ingen resultater fundet. Pr&oslash;v igen senere.</p>'
-    else:
-        for listing in all_listings:
-            if listing.get("image"):
-                img_html = f'<img src="{html.escape(listing["image"])}" alt="{html.escape(listing["title"])}" loading="lazy" onerror="this.parentElement.innerHTML=\'<div class=no-img>Intet billede</div>\'">'
-            else:
-                img_html = '<div class="no-img">Intet billede</div>'
+def scrape_section(section):
+    listings = []
+    seen_urls = set()
 
-            price_display = format_price(listing.get("price_num", 0))
-            category_display = listing.get("category", "")
+    print(f"\n{'─'*50}")
+    print(f"Sektion: {section['title']}")
+    print(f"{'─'*50}")
 
-            cards_html += f'''
-            <a href="{html.escape(listing["url"])}" target="_blank" rel="noopener" class="card">
-                <div class="card-img">{img_html}</div>
-                <div class="card-body">
-                    <h3>{html.escape(listing["title"])}</h3>
-                    <div class="price">{html.escape(price_display)}</div>
-                    <span class="badge">{html.escape(category_display)}</span>
-                </div>
-            </a>'''
+    for category, query in section["searches"]:
+        url = BASE_URL.format(query=query)
+        print(f"  Henter: {category} ({url})")
+        try:
+            html_text = fetch_page(url)
+            raw = parse_json_ld(html_text)
+            print(f"    Fundet {len(raw)} annoncer i JSON-LD")
 
-    count = len(all_listings)
+            for listing in raw:
+                listing_url = listing["url"].rstrip("/")
+                if listing_url in seen_urls:
+                    continue
+                if is_excluded(listing, section):
+                    continue
+                seen_urls.add(listing_url)
+                listing["category"] = category
+                listings.append(listing)
+                print(f"    + {listing['title'][:60]} — {format_price(listing['price_num'])}")
+
+        except Exception as e:
+            print(f"    Fejl: {e}")
+
+    listings.sort(key=lambda l: l.get("price_num", 0), reverse=True)
+    print(f"  Totalt: {len(listings)} resultater")
+    return listings
+
+
+# ── HTML generation ──────────────────────────────────────────────────
+
+def render_cards(listings):
+    if not listings:
+        return '<p class="empty">Ingen resultater fundet.</p>'
+
+    cards = ""
+    for listing in listings:
+        if listing.get("image"):
+            img_html = f'<img src="{html.escape(listing["image"])}" alt="{html.escape(listing["title"])}" loading="lazy" onerror="this.parentElement.innerHTML=\'<div class=no-img>Intet billede</div>\'">'
+        else:
+            img_html = '<div class="no-img">Intet billede</div>'
+
+        price_display = format_price(listing.get("price_num", 0))
+        category_display = listing.get("category", "")
+
+        cards += f'''
+        <a href="{html.escape(listing["url"])}" target="_blank" rel="noopener" class="card">
+            <div class="card-img">{img_html}</div>
+            <div class="card-body">
+                <h3>{html.escape(listing["title"])}</h3>
+                <div class="price">{html.escape(price_display)}</div>
+                <span class="badge">{html.escape(category_display)}</span>
+            </div>
+        </a>'''
+    return cards
+
+
+def generate_html(section_results, timestamp):
+    total = sum(len(listings) for _, listings in section_results)
+
+    # Build nav links
+    nav_html = ""
+    for section, listings in section_results:
+        count = len(listings)
+        nav_html += f'<a href="#{html.escape(section["id"])}" class="nav-link">{html.escape(section["title"])} <span class="nav-count">{count}</span></a>'
+
+    # Build sections
+    sections_html = ""
+    for section, listings in section_results:
+        count = len(listings)
+        sections_html += f'''
+        <section id="{html.escape(section["id"])}">
+            <div class="section-header">
+                <h2>{html.escape(section["title"])}</h2>
+                <p>{section["subtitle"]}</p>
+                <span class="section-count">{count} resultater</span>
+            </div>
+            <div class="grid">
+                {render_cards(listings)}
+            </div>
+        </section>'''
 
     return f'''<!DOCTYPE html>
 <html lang="da">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Tal R &mdash; DBA Originaler</title>
+<title>DBA Kunst &mdash; Originaler</title>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{
@@ -184,11 +260,67 @@ def generate_html(all_listings, timestamp):
     font-size: 0.8rem;
     color: #666;
   }}
+  nav {{
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    padding: 1rem 2rem;
+    background: #151515;
+    border-bottom: 1px solid #222;
+  }}
+  .nav-link {{
+    color: #aaa;
+    text-decoration: none;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    transition: background 0.2s, color 0.2s;
+  }}
+  .nav-link:hover {{
+    background: #2a2a2a;
+    color: #fff;
+  }}
+  .nav-count {{
+    display: inline-block;
+    background: #333;
+    color: #888;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    margin-left: 4px;
+  }}
+  section {{
+    padding-bottom: 1rem;
+  }}
+  .section-header {{
+    padding: 2rem 2rem 0.5rem;
+    max-width: 1400px;
+    margin: 0 auto;
+  }}
+  .section-header h2 {{
+    font-size: 1.4rem;
+    font-weight: 400;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #fff;
+    border-bottom: 1px solid #333;
+    padding-bottom: 0.5rem;
+    display: inline-block;
+  }}
+  .section-header p {{
+    color: #777;
+    font-size: 0.8rem;
+    margin-top: 0.4rem;
+  }}
+  .section-count {{
+    color: #555;
+    font-size: 0.75rem;
+  }}
   .grid {{
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 1.5rem;
-    padding: 2rem;
+    padding: 1rem 2rem 2rem;
     max-width: 1400px;
     margin: 0 auto;
   }}
@@ -259,63 +391,47 @@ def generate_html(all_listings, timestamp):
   @media (max-width: 600px) {{
     .grid {{ padding: 1rem; gap: 1rem; }}
     header {{ padding: 1.5rem 1rem; }}
+    nav {{ flex-wrap: wrap; }}
   }}
 </style>
 </head>
 <body>
 <header>
-  <h1>Tal R &mdash; Originaler p&aring; DBA</h1>
-  <p>Litografier, malerier og tryk &mdash; kun signerede originaler, ingen plakater</p>
+  <h1>DBA Kunst</h1>
+  <p>Originaler &amp; signerede v&aelig;rker fra DBA.dk</p>
   <div class="meta">
-    <span>{count} resultater</span>
+    <span>{total} resultater</span>
     <span>Opdateret: {timestamp}</span>
   </div>
 </header>
-<div class="grid">
-{cards_html}
-</div>
+<nav>
+{nav_html}
+</nav>
+{sections_html}
 </body>
 </html>'''
 
 
+# ── Main ─────────────────────────────────────────────────────────────
+
 def main():
-    all_listings = []
-    seen_urls = set()
+    section_results = []
 
-    for category, query in SEARCHES:
-        url = BASE_URL.format(query=query)
-        print(f"Henter: {category} ({url})")
-        try:
-            html_text = fetch_page(url)
-            listings = parse_json_ld(html_text)
-            print(f"  Fundet {len(listings)} annoncer i JSON-LD")
-
-            for listing in listings:
-                listing_url = listing["url"].rstrip("/")
-                if listing_url in seen_urls:
-                    continue
-                if is_excluded(listing):
-                    continue
-                seen_urls.add(listing_url)
-                listing["category"] = category
-                all_listings.append(listing)
-                print(f"  + {listing['title'][:60]} — {format_price(listing['price_num'])}")
-
-        except Exception as e:
-            print(f"  Fejl: {e}")
-
-    all_listings.sort(key=lambda l: l.get("price_num", 0), reverse=True)
+    for section in SECTIONS:
+        listings = scrape_section(section)
+        section_results.append((section, listings))
 
     timestamp = datetime.now().strftime("%d/%m/%Y kl. %H:%M")
-    html_output = generate_html(all_listings, timestamp)
+    html_output = generate_html(section_results, timestamp)
 
     output_path = os.path.join(OUTPUT_DIR, "index.html")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html_output)
 
+    total = sum(len(l) for _, l in section_results)
     print(f"\n{'='*50}")
     print(f"Genereret: {output_path}")
-    print(f"Antal originaler fundet: {len(all_listings)}")
+    print(f"Totalt: {total} resultater")
     print(f"Tidsstempel: {timestamp}")
 
 
